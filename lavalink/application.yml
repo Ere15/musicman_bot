@@ -1,21 +1,25 @@
 server:
-  port: 2333 # Меняем порт на стандартный для Wavelink
+  port: 2333
   address: 127.0.0.1
+
 lavalink:
   plugins:
-    # Подключаем актуальный плагин для работы с YouTube
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.1"
+      repository: "https://maven.lavalink.dev/releases"
+      snapshot: false
     - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
+      snapshot: false
   server:
+    password: "youshallnotpass"   # не забудьте свой пароль!
     sources:
-      # Отключаем старый встроенный YouTube, как просит лог
-      youtube: false
-      bandcamp: true
-      soundcloud: true
-      twitch: true
-      vimeo: true
-      mixer: false
-      http: true
+      youtube: false      # отключаем встроенный, используем youtube-plugin
+      bandcamp: false
+      soundcloud: false
+      twitch: false
+      vimeo: false
+      http: false
       local: false
+      # ytdlp здесь быть не должно — это источник LavaSrc, включается ниже
     filters:
       volume: true
       equalizer: true
@@ -31,7 +35,6 @@ lavalink:
 logging:
   file:
     path: ./logs/
-
   level:
     root: INFO
     lavalink: INFO
@@ -46,3 +49,26 @@ plugins:
       - MUSIC
       - WEB
       - ANDROID_VR
+
+  lavasrc:
+    providers:
+      - "ytsearch:\"%ISRC%\""
+      - "ytsearch:%QUERY%"
+    sources:
+      yandexmusic: true
+      ytdlp: true          # вот тут реально включается yt-dlp источник
+    ytdlp:
+      path: "yt-dlp"        # убедитесь, что бинарник доступен в PATH процесса Lavalink
+      searchLimit: 10
+      mixPlaylistLoadLimit: 25
+      playlistLoadLimit: 1000
+    yandexmusic:
+      accessToken: "y0__wgBEMOpoKwCGN74BiDT05P9F4B4QTNtASf566DxWGAWuzaXrpYK"
+      playlistLoadLimit: 1
+      albumLoadLimit: 1
+      artistLoadLimit: 1
+    logging:
+      level:
+        root: INFO
+        lavalink: INFO
+        com.github.topi314.lavasrc: TRACE
