@@ -4,9 +4,20 @@
 BOT_DIR=$(pwd)
 LAVALINK_DIR="lavalink"
 
+# === ДОБАВЛЕНО: Загрузка переменных из .env ===
+if [ -f "$BOT_DIR/.env" ]; then
+  echo "⚙️ Загрузка переменных окружения из .env..."
+  # Читаем .env, игнорируя комментарии, и экспортируем переменные в ОС
+  export $(grep -v '^#' "$BOT_DIR/.env" | xargs)
+else
+  echo "⚠️ Предупреждение: Файл .env не найден в корне проекта!"
+fi
+# =============================================
+
 echo "⏳ Шаг 1: Запуск сервера Lavalink..."
 cd "$LAVALINK_DIR" || { echo "❌ Ошибка: Папка Lavalink не найдена"; exit 1; }
 
+# Теперь переменная $LAVALINK_PASSWORD видна Java-процессу
 java -jar Lavalink.jar > lavalink.log 2>&1 &
 LAVALINK_PID=$!
 

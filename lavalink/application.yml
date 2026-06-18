@@ -6,7 +6,6 @@ lavalink:
     # Подключаем актуальный плагин для работы с YouTube
     - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
   server:
-    password: "youshallnotpass"
     sources:
       # Отключаем старый встроенный YouTube, как просит лог
       youtube: false
