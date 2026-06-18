@@ -1,0 +1,49 @@
+server:
+  port: 2333 # Меняем порт на стандартный для Wavelink
+  address: 127.0.0.1
+lavalink:
+  plugins:
+    # Подключаем актуальный плагин для работы с YouTube
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
+  server:
+    password: "youshallnotpass"
+    sources:
+      # Отключаем старый встроенный YouTube, как просит лог
+      youtube: false
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      mixer: false
+      http: true
+      local: false
+    filters:
+      volume: true
+      equalizer: true
+    bufferDurationMs: 400
+    frameBufferDurationMs: 5000
+    opusEncodingQuality: 10
+    resamplingQuality: HIGH
+    trackStuckThresholdMs: 10000
+    useSeekGhosting: true
+    youtubePlaylistLoadLimit: 6
+    playerUpdateInterval: 5
+
+logging:
+  file:
+    path: ./logs/
+
+  level:
+    root: INFO
+    lavalink: INFO
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    clients:
+      - MUSIC
+      - WEB
+      - ANDROID_VR
