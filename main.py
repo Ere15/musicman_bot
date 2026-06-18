@@ -44,31 +44,33 @@ async def on_ready():
 # Команда воспроизведения музыки
 @bot.command(name='play')
 async def play(ctx: commands.Context, *, search: str):
-    # Проверяем, находится ли пользователь в голосовом канале
     if not ctx.author.voice:
         return await ctx.send("Сначала войдите в голосовой канал!")
 
-    # Подключаемся к каналу или берем существующий плеер
     if not ctx.voice_client:
         vc: wavelink.Player = await ctx.author.voice.channel.connect(cls=wavelink.Player)
     else:
         vc: wavelink.Player = ctx.voice_client
 
-    # Поиск трека (в данном случае через YouTube)
-    tracks = await wavelink.Playable.search(search, source=wavelink.TrackSource.YouTube)
+    # 🔽 Убираем source – Lavalink сам определит, что за ссылка
+    tracks = await wavelink.Playable.search(search)
     if not tracks:
         return await ctx.send("Ничего не найдено по вашему запросу.")
 
-    track = tracks[0]  # Берем первый трек из результатов поиска
-
-    # Если музыка уже играет, добавляем в очередь, иначе запускаем
-    if vc.playing:
-        await vc.queue.put_wait(track)
-        await ctx.send(f"Добавлено в очередь: **{track.title}**")
+    # Если поиск вернул плейлист, можно взять первый трек или все
+    if isinstance(tracks, wavelink.Playlist):
+        # Добавляем все треки плейлиста в очередь
+        for track in tracks.tracks:
+            await vc.queue.put_wait(track)
+        await ctx.send(f"Добавлен плейлист **{tracks.name}** ({len(tracks.tracks)} треков)")
     else:
-        await vc.play(track)
-        await ctx.send(f"Сейчас играет: **{track.title}**")
-
+        track = tracks[0]
+        if vc.playing:
+            await vc.queue.put_wait(track)
+            await ctx.send(f"Добавлено в очередь: **{track.title}**")
+        else:
+            await vc.play(track)
+            await ctx.send(f"Сейчас играет: **{track.title}**")
 # Команда остановки и выхода из канала
 @bot.command(name='stop')
 async def stop(ctx: commands.Context):
