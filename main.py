@@ -34,61 +34,6 @@ def get_queue(guild_id):
     return queues[guild_id]
 
 
-def get_cookies_string():
-    """Возвращает куки сессии Яндекс.Музыки для передачи в FFmpeg."""
-    if ym_client is None:
-        return ""
-    return "; ".join(f"{c.name}={c.value}" for c in ym_client.session.cookies)
-
-
-async def get_yandex_direct_link(track_id):
-    """Асинхронно получает прямую ссылку на трек по ID."""
-    if ym_client is None:
-        raise RuntimeError("Яндекс.Музыка не настроена")
-    loop = asyncio.get_event_loop()
-
-    def _sync():
-        track = ym_client.tracks([track_id])[0]
-        # get_direct_links=False, чтобы не вызывать автоматически get_direct_link()
-        info = track.get_download_info(get_direct_links=False)
-        best = max(info, key=lambda x: x.bitrate_in_kbps)
-        # явно получаем прямую ссылку внутри потока
-        return best.get_direct_link()
-
-    return await loop.run_in_executor(None, _sync)
-
-
-async def get_yandex_track_info(track_id):
-    """Асинхронно получает прямую ссылку и название трека по ID."""
-    if ym_client is None:
-        raise RuntimeError("Яндекс.Музыка не настроена")
-    loop = asyncio.get_event_loop()
-
-    def _sync():
-        track = ym_client.tracks([track_id])[0]
-        info = track.get_download_info(get_direct_links=False)
-        best = max(info, key=lambda x: x.bitrate_in_kbps)
-        direct_url = best.get_direct_link()
-        return direct_url, track.title
-
-    return await loop.run_in_executor(None, _sync)
-
-
-async def search_yandex_track(query):
-    """Асинхронный поиск трека в Яндекс.Музыке по тексту."""
-    if ym_client is None:
-        raise RuntimeError("Яндекс.Музыка не настроена")
-    loop = asyncio.get_event_loop()
-
-    def _sync():
-        result = ym_client.search(query, type_='track')
-        if result.tracks and result.tracks.results:
-            return result.tracks.results[0].id
-        return None
-
-    return await loop.run_in_executor(None, _sync)
-
-
 async def play_next(ctx):
     """Воспроизводит следующий трек из очереди."""
     guild_id = ctx.guild.id
@@ -97,35 +42,55 @@ async def play_next(ctx):
 
     if vc is None or not vc.is_connected():
         return
+
     if queue.empty():
         current_tracks[guild_id] = None
         return
 
-    data = await queue.get()
-    title = data["title"]
+    old_source, title, original_query = await queue.get()
+    track_id = None
 
     try:
-        if data["type"] == "yandex":
-            direct_link = await get_yandex_direct_link(data["track_id"])
+        track_url_match = re.search(r'track/(\d+)', str(original_query))
+
+        if track_url_match:
+            track_id = track_url_match.group(1)
+        elif hasattr(old_source, 'id'):
+            track_id = old_source.id
+        elif isinstance(old_source, (int, str)) and str(old_source).isdigit():
+            track_id = old_source
         else:
-            source_url, _, ok = await get_audio_source_ytdlp(data["query"])
-            if not ok or source_url is None:
-                raise ValueError("Не удалось получить аудио")
-            direct_link = source_url
+            # Асинхронная обёртка для поиска
+            loop = asyncio.get_event_loop()
+            search_result = await loop.run_in_executor(
+                None, lambda: ym_client.search(original_query, type_='track')
+            )
+            if search_result.tracks and search_result.tracks.results:
+                track_id = search_result.tracks.results[0].id
+            else:
+                raise ValueError("Трек не найден")
+
+        if not track_id:
+            raise ValueError("Не удалось определить ID трека")
+
+        # Асинхронно получаем свежую прямую ссылку
+        def get_direct():
+            track_obj = ym_client.tracks([track_id])
+            info = track_obj[0].get_download_info(get_direct_links=True)
+            best = max(info, key=lambda x: x.bitrate_in_kbps)
+            return best.get_direct_link()
+
+        direct_link = await asyncio.get_event_loop().run_in_executor(None, get_direct)
+
     except Exception as e:
         await ctx.send(f"❌ Не удалось воспроизвести трек: **{title}**")
-        print(f"Ошибка воспроизведения: {e}")
+        print(f"Ошибка обновления ссылки для '{title}': {e}")
         bot.loop.call_soon_threadsafe(lambda: bot.loop.create_task(play_next(ctx)))
         return
 
-    # Формируем заголовки с куками для FFmpeg
     headers = (
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n"
-        "Accept: */*\r\n"
-        "Accept-Language: ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7\r\n"
-        "Origin: https://music.yandex.ru\r\n"
-        "Referer: https://music.yandex.ru/\r\n"
-        + (f"Cookie: {cookie_str}\r\n" if (cookie_str := get_cookies_string()) else "")
+        "Referer: https://yandex.ru\r\n"
     )
 
     audio = discord.FFmpegOpusAudio(
@@ -133,8 +98,7 @@ async def play_next(ctx):
         before_options=(
             "-reconnect 1 "
             "-reconnect_streamed 1 "
-            "-reconnect_delay_max 10 "
-            "-reconnect_max_retries 3 "
+            "-reconnect_delay_max 5 "
             f'-headers "{headers}"'
         ),
         options="-vn"
@@ -153,8 +117,43 @@ async def play_next(ctx):
     await ctx.send(f"🎵 Сейчас играет: **{title}**")
 
 
+async def get_audio_source(query):
+    """
+    Возвращает (source_url, title, is_ok) для запроса.
+    """
+    yandex_pattern = r'(https?://)?(music\.yandex\.ru|yandex\.ru/music)'
+    if re.match(yandex_pattern, query) and ym_client:
+        try:
+            track_match = re.search(r'/track/(\d+)', query)
+            if track_match:
+                track_id = int(track_match.group(1))
+
+                # Асинхронно получаем инфу о треке
+                def get_yandex():
+                    track = ym_client.tracks([track_id])[0]
+                    download_info = track.get_download_info(get_direct_links=True)
+                    if download_info:
+                        best = max(download_info, key=lambda x: x.bitrate_in_kbps)
+                        direct_url = best.get_direct_link()
+                        return direct_url, track.title
+                    return None, None
+
+                direct_url, title = await asyncio.get_event_loop().run_in_executor(None, get_yandex)
+                if direct_url:
+                    return direct_url, title, True
+
+                # Fallback на yt-dlp
+                return await get_audio_source_ytdlp(query)
+
+        except Exception as e:
+            print(f"Ошибка Яндекс API: {e}")
+            return await get_audio_source_ytdlp(query)
+
+    return await get_audio_source_ytdlp(query)
+
+
 async def get_audio_source_ytdlp(query):
-    """Универсальный загрузчик через yt-dlp (асинхронный)."""
+    """Универсальный загрузчик через yt-dlp. АСИНХРОННЫЙ."""
     ydl_opts = {
         'format': 'bestaudio/best',
         'quiet': True,
@@ -221,61 +220,13 @@ async def play(ctx, *, query):
     elif ctx.voice_client.channel != voice_channel:
         await ctx.voice_client.move_to(voice_channel)
 
-    # Проверяем, является ли запрос ссылкой на Яндекс
-    yandex_pattern = r'(https?://)?(music\.yandex\.ru|yandex\.ru/music)'
-    is_yandex_query = bool(re.match(yandex_pattern, query))
-
-    if is_yandex_query and ym_client:
-        track_match = re.search(r'/track/(\d+)', query)
-        if track_match:
-            track_id = int(track_match.group(1))
-            try:
-                direct_url, title = await get_yandex_track_info(track_id)
-                source_url, title, is_ok = direct_url, title, True
-            except Exception as e:
-                print(f"Ошибка Яндекс: {e}")
-                return await ctx.send("❌ Не удалось получить трек с Яндекса.")
-        else:
-            return await ctx.send("❌ Некорректная ссылка на Яндекс.Музыку.")
-    else:
-        # Для обычных запросов или других платформ используем yt-dlp
-        source_url, title, is_ok = await get_audio_source_ytdlp(query)
-        if not is_ok:
-            # Если не получилось через yt-dlp, попробуем поискать в Яндексе (если настроен)
-            if ym_client:
-                try:
-                    track_id = await search_yandex_track(query)
-                    if track_id:
-                        direct_url, title = await get_yandex_track_info(track_id)
-                        source_url, title, is_ok = direct_url, title, True
-                        is_yandex_query = True
-                    else:
-                        return await ctx.send("❌ Ничего не найдено.")
-                except Exception:
-                    return await ctx.send("❌ Ничего не найдено.")
-            else:
-                return await ctx.send("❌ Не удалось найти аудио.")
-
-    if not source_url:
-        return await ctx.send("❌ Не удалось получить ссылку на аудио.")
+    source_url, title, is_ok = await get_audio_source(query)
+    if not is_ok or source_url is None:
+        return await ctx.send("❌ Не удалось найти аудио по запросу.")
 
     guild_id = ctx.guild.id
     queue = get_queue(guild_id)
-
-    # Сохраняем в очередь с типом источника
-    if is_yandex_query and ym_client and track_match:
-        queue.put_nowait({
-            "type": "yandex",
-            "track_id": track_id,
-            "title": title,
-            "query": query
-        })
-    else:
-        queue.put_nowait({
-            "type": "other",
-            "query": query,
-            "title": title
-        })
+    await queue.put((source_url, title, query))
 
     vc = ctx.voice_client
     if not vc.is_playing():
@@ -345,12 +296,11 @@ async def show_queue(ctx):
 
     items = []
     temp_list = []
-
     while not queue.empty():
         item = await queue.get()
         temp_list.append(item)
         if len(items) < 5:
-            items.append(item["title"])
+            items.append(item[1])
 
     for item in temp_list:
         await queue.put(item)
