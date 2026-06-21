@@ -34,6 +34,91 @@ def get_queue(guild_id):
     return queues[guild_id]
 
 
+# ---------------------------------------------------------------------------
+# Парсинг ссылок Яндекс.Музыки
+# ---------------------------------------------------------------------------
+
+def parse_yandex_url(url: str):
+    """
+    Разбирает URL Яндекс.Музыки и возвращает тип + параметры.
+
+    Поддерживаемые форматы:
+      - /track/<id>
+      - /album/<id>
+      - /album/<album_id>/track/<track_id>
+      - /users/<login>/playlists/<kind>
+
+    Возвращает dict с ключом 'type' и нужными полями, либо None.
+    """
+    # Трек внутри альбома: /album/123/track/456
+    m = re.search(r'/album/(\d+)/track/(\d+)', url)
+    if m:
+        return {'type': 'track', 'track_id': int(m.group(2))}
+
+    # Просто трек: /track/456
+    m = re.search(r'/track/(\d+)', url)
+    if m:
+        return {'type': 'track', 'track_id': int(m.group(1))}
+
+    # Альбом: /album/123
+    m = re.search(r'/album/(\d+)', url)
+    if m:
+        return {'type': 'album', 'album_id': int(m.group(1))}
+
+    # Пользовательский плейлист: /users/<login>/playlists/<kind>
+    m = re.search(r'/users/([^/]+)/playlists/(\d+)', url)
+    if m:
+        return {'type': 'playlist', 'user_login': m.group(1), 'kind': int(m.group(2))}
+
+    return None
+
+
+async def fetch_yandex_tracks(parsed: dict) -> list[tuple]:
+    """
+    По результату parse_yandex_url возвращает список (track_id, title).
+    Работает через executor, чтобы не блокировать event loop.
+    """
+    loop = asyncio.get_event_loop()
+
+    if parsed['type'] == 'track':
+        def _get():
+            t = ym_client.tracks([parsed['track_id']])[0]
+            return [(t.id, t.title)]
+        return await loop.run_in_executor(None, _get)
+
+    elif parsed['type'] == 'album':
+        def _get():
+            album = ym_client.albums_with_tracks(parsed['album_id'])
+            tracks = []
+            for vol in (album.volumes or []):
+                for t in vol:
+                    tracks.append((t.id, t.title))
+            return tracks
+        return await loop.run_in_executor(None, _get)
+
+    elif parsed['type'] == 'playlist':
+        def _get():
+            pl = ym_client.users_playlists(
+                kind=parsed['kind'],
+                user_id=parsed['user_login']
+            )
+            # fetch_tracks=True чтобы получить полные объекты треков
+            pl = pl.fetch_tracks()
+            tracks = []
+            for pt in (pl.tracks or []):
+                t = pt.track
+                if t:
+                    tracks.append((t.id, t.title))
+            return tracks
+        return await loop.run_in_executor(None, _get)
+
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Воспроизведение
+# ---------------------------------------------------------------------------
+
 async def play_next(ctx):
     """Воспроизводит следующий трек из очереди."""
     guild_id = ctx.guild.id
@@ -60,7 +145,6 @@ async def play_next(ctx):
         elif isinstance(old_source, (int, str)) and str(old_source).isdigit():
             track_id = old_source
         else:
-            # Асинхронная обёртка для поиска
             loop = asyncio.get_event_loop()
             search_result = await loop.run_in_executor(
                 None, lambda: ym_client.search(original_query, type_='track')
@@ -73,7 +157,6 @@ async def play_next(ctx):
         if not track_id:
             raise ValueError("Не удалось определить ID трека")
 
-        # Асинхронно получаем свежую прямую ссылку
         def get_direct():
             track_obj = ym_client.tracks([track_id])
             info = track_obj[0].get_download_info(get_direct_links=True)
@@ -119,7 +202,7 @@ async def play_next(ctx):
 
 async def get_audio_source(query):
     """
-    Возвращает (source_url, title, is_ok) для запроса.
+    Возвращает (source_url, title, is_ok) для одиночного запроса.
     """
     yandex_pattern = r'(https?://)?(music\.yandex\.ru|yandex\.ru/music)'
     if re.match(yandex_pattern, query) and ym_client:
@@ -128,7 +211,6 @@ async def get_audio_source(query):
             if track_match:
                 track_id = int(track_match.group(1))
 
-                # Асинхронно получаем инфу о треке
                 def get_yandex():
                     track = ym_client.tracks([track_id])[0]
                     download_info = track.get_download_info(get_direct_links=True)
@@ -142,7 +224,6 @@ async def get_audio_source(query):
                 if direct_url:
                     return direct_url, title, True
 
-                # Fallback на yt-dlp
                 return await get_audio_source_ytdlp(query)
 
         except Exception as e:
@@ -203,6 +284,10 @@ async def get_audio_source_ytdlp(query):
     return source_url, title, True
 
 
+# ---------------------------------------------------------------------------
+# События и команды
+# ---------------------------------------------------------------------------
+
 @bot.event
 async def on_ready():
     print(f"Бот {bot.user} готов!")
@@ -210,7 +295,10 @@ async def on_ready():
 
 @bot.command(name='play')
 async def play(ctx, *, query):
-    """Воспроизвести музыку по ссылке или поисковому запросу."""
+    """
+    Воспроизвести музыку по ссылке или поисковому запросу.
+    Поддерживает ссылки на трек, альбом и плейлист Яндекс.Музыки.
+    """
     if not ctx.author.voice:
         return await ctx.send("Вы не в голосовом канале!")
 
@@ -220,6 +308,44 @@ async def play(ctx, *, query):
     elif ctx.voice_client.channel != voice_channel:
         await ctx.voice_client.move_to(voice_channel)
 
+    yandex_pattern = r'(https?://)?(music\.yandex\.ru|yandex\.ru/music)'
+    is_yandex_url = bool(re.match(yandex_pattern, query))
+
+    # --- Плейлист / альбом ЯМ ---
+    if is_yandex_url and ym_client:
+        parsed = parse_yandex_url(query)
+
+        if parsed and parsed['type'] in ('album', 'playlist'):
+            await ctx.send("⏳ Загружаю треки...")
+            try:
+                track_list = await fetch_yandex_tracks(parsed)
+            except Exception as e:
+                print(f"Ошибка загрузки плейлиста/альбома: {e}")
+                return await ctx.send("❌ Не удалось загрузить плейлист или альбом.")
+
+            if not track_list:
+                return await ctx.send("❌ Плейлист или альбом пуст.")
+
+            guild_id = ctx.guild.id
+            queue = get_queue(guild_id)
+            vc = ctx.voice_client
+            already_playing = vc.is_playing()
+
+            for track_id, title in track_list:
+                # Кладём track_id как source (play_next умеет его обработать),
+                # original_query тоже track_id — чтобы play_next нашёл ссылку по ID
+                await queue.put((track_id, title, str(track_id)))
+
+            label = "плейлист" if parsed['type'] == 'playlist' else "альбом"
+            await ctx.send(
+                f"✅ Добавлено в очередь {len(track_list)} треков из {label}а."
+            )
+
+            if not already_playing:
+                await play_next(ctx)
+            return
+
+    # --- Одиночный трек / YouTube / поиск ---
     source_url, title, is_ok = await get_audio_source(query)
     if not is_ok or source_url is None:
         return await ctx.send("❌ Не удалось найти аудио по запросу.")
