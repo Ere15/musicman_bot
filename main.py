@@ -102,7 +102,9 @@ async def fetch_yandex_tracks(parsed: dict) -> list[tuple]:
                 kind=parsed['kind'],
                 user_id=parsed['user_login']
             )
-            # fetch_tracks=True чтобы получить полные объекты треков
+            # users_playlists может вернуть список — берём первый элемент
+            if isinstance(pl, list):
+                pl = pl[0]
             pl = pl.fetch_tracks()
             tracks = []
             for pt in (pl.tracks or []):
