@@ -106,6 +106,8 @@ async def fetch_yandex_tracks(parsed: dict) -> list[tuple]:
             if isinstance(pl, list):
                 pl = pl[0]
             pl = pl.fetch_tracks()
+            if isinstance(pl, list):
+                pl = pl[0]
             tracks = []
             for pt in (pl.tracks or []):
                 t = pt.track
