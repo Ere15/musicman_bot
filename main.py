@@ -105,12 +105,18 @@ async def fetch_yandex_tracks(parsed: dict) -> list[tuple]:
             # users_playlists может вернуть список — берём первый элемент
             if isinstance(pl, list):
                 pl = pl[0]
-            pl = pl.fetch_tracks()
-            if isinstance(pl, list):
-                pl = pl[0]
+            fetched = pl.fetch_tracks()
+            # fetch_tracks() может вернуть Playlist или list[TrackShort]
+            if hasattr(fetched, 'tracks'):
+                track_shorts = fetched.tracks or []
+            elif isinstance(fetched, list):
+                track_shorts = fetched
+            else:
+                track_shorts = []
             tracks = []
-            for pt in (pl.tracks or []):
-                t = pt.track
+            for pt in track_shorts:
+                # TrackShort.fetch_track() -> полный Track
+                t = pt.fetch_track() if hasattr(pt, 'fetch_track') else getattr(pt, 'track', None)
                 if t:
                     tracks.append((t.id, t.title))
             return tracks
